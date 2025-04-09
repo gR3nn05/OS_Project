@@ -1,0 +1,2 @@
+[Thu Apr 10 01:48:32 2025] Added treasure ID 1 to hunt Hunt1
+[Thu Apr 10 01:48:43 2025] Added treasure ID 12 to hunt Hunt1
