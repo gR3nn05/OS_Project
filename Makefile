@@ -1,15 +1,16 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -g
-SRC = src/treasure_manager.c
+SRC_DIR = src
+TARGET = treasure_manager
+
+SRC = $(SRC_DIR)/treasure_manager.c
 OBJ = $(SRC:.c=.o)
-OUT = treasure_manager
 
-all: $(OUT)
+$(TARGET): $(OBJ)
+	$(CC) $(CFLAGS) -o $(TARGET) $(OBJ)
 
-$(OUT): $(OBJ)
-	$(CC) $(CFLAGS) -o $(OUT) $(OBJ)
+$(SRC_DIR)/%.o: $(SRC_DIR)/%.c
+	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(OUT) src/*.o
-
-.PHONY: all clean
+	rm -f $(SRC_DIR)/*.o $(TARGET)

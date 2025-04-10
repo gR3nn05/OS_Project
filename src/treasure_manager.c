@@ -8,15 +8,15 @@
 #include <time.h>
 #include <dirent.h>
 #include <errno.h>
-#include "../include/treasure.h"
+#include "treasure.h"
 
 #define HUNTS_DIR "hunts"
 #define TREASURE_FILE "treasures.dat"
-#define LOG_FILE "log.txt"
+#define LOG_FILE "log"
 
 
 void print_usage() {
-    printf("Usage: treasure_manager --<operation> <args>\n");
+    printf("Usage: treasure_manager <operation> <args>\n");
 }
 
 void log_operation(const char *hunt_id, const char *message) {
@@ -39,15 +39,15 @@ void log_operation(const char *hunt_id, const char *message) {
     write(log_fd, log_entry, strlen(log_entry));
     close(log_fd);
 
-    // Create symlink if it doesn't exist
-    // char symlink_name[256];
-    // snprintf(symlink_name, sizeof(symlink_name), "log.txt%s", hunt_id);
+    // Creating symlink to log file
+    char symlink_name[256];
+    snprintf(symlink_name, sizeof(symlink_name), "%s_%s", LOG_FILE, hunt_id);
 
-    // if (access(symlink_name, F_OK) == -1) {
-    //     char target[256];
-    //     snprintf(target, sizeof(target), "%s/%s/%s", HUNTS_DIR, hunt_id, LOG_FILE);
-    //     symlink(target, symlink_name);
-    // }
+    if (access(symlink_name, F_OK) == -1) {
+        char target[256];
+        snprintf(target, sizeof(target), "%s/%s/%s", HUNTS_DIR, hunt_id, LOG_FILE);
+        symlink(target, symlink_name);
+    }
 }
 
 void add_treasure(const char *hunt_id) {
@@ -162,6 +162,85 @@ void view_treasure(const char *hunt_id, int target_id) {
 }
 
 
+void remove_hunt(char *hunt_id) {
+    char dir_path[512];
+    snprintf(dir_path, sizeof(dir_path), "%s/%s", HUNTS_DIR, hunt_id);
+
+    DIR *dir = opendir(dir_path);
+    if (!dir) {
+        perror("Failed to open hunt directory");
+        return;
+    }
+
+    struct dirent *entry;
+    char file_path[1024];
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        snprintf(file_path, sizeof(file_path), "%s/%s", dir_path, entry->d_name);
+        if (remove(file_path) == -1) {
+            perror("Failed to remove file");
+        }
+    }
+    closedir(dir);
+
+    if (rmdir(dir_path) == -1) {
+        perror("Failed to remove hunt directory");
+    } else {
+        printf("Hunt %s removed successfully.\n", hunt_id);
+    }
+}
+
+
+void remove_treasure(const char *hunt_id, int target_id) {
+    char file_path[512], temp_path[512];
+    snprintf(file_path, sizeof(file_path), "%s/%s/%s", HUNTS_DIR, hunt_id, TREASURE_FILE);
+    snprintf(temp_path, sizeof(temp_path), "%s/%s/temp.dat", HUNTS_DIR, hunt_id);
+
+    int in_fd = open(file_path, O_RDONLY);
+    if (in_fd == -1) {
+        perror("Failed to open treasure file");
+        return;
+    }
+
+    int out_fd = open(temp_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (out_fd == -1) {
+        perror("Failed to create temporary file");
+        close(in_fd);
+        return;
+    }
+
+    Treasure t;
+    int found = 0;
+    while (read(in_fd, &t, sizeof(Treasure)) == sizeof(Treasure)) {
+        if (t.id == target_id) {
+            found = 1;
+            continue; // skip this one
+        }
+        write(out_fd, &t, sizeof(Treasure));
+    }
+
+    close(in_fd);
+    close(out_fd);
+
+    if (found) {
+        if (rename(temp_path, file_path) == 0) {
+            printf("Removed treasure ID %d from hunt %s.\n", target_id, hunt_id);
+
+            char log_msg[256];
+            snprintf(log_msg, sizeof(log_msg), "Removed treasure ID %d from hunt %s", target_id, hunt_id);
+            log_operation(hunt_id, log_msg);
+        } else {
+            perror("Failed to replace original file");
+        }
+    } else {
+        printf("Treasure ID %d not found in hunt %s.\n", target_id, hunt_id);
+        unlink(temp_path);
+    }
+}
+
 
 
 int main(int argc, char *argv[]) {
@@ -170,16 +249,16 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    if (strcmp(argv[1], "--add") == 0) {
+    if (strcmp(argv[1], "add") == 0) {
         add_treasure(argv[2]);
-    } else if (strcmp(argv[1], "--list") == 0) {
+    } else if (strcmp(argv[1], "list") == 0) {
         list_treasures(argv[2]);
-    } else if (strcmp(argv[1], "--view") == 0) {
+    } else if (strcmp(argv[1], "view") == 0) {
         view_treasure(argv[2], atoi(argv[3]));
-    } else if (strcmp(argv[1], "--remove_treasure") == 0) {
-        // TODO: Remove treasure
-    } else if (strcmp(argv[1], "--remove_hunt") == 0) {
-        // TODO: Remove hunt
+    } else if (strcmp(argv[1], "remove_treasure") == 0) {
+        remove_treasure(argv[2], atoi(argv[3]));
+    } else if (strcmp(argv[1], "remove_hunt") == 0) {
+        remove_hunt(argv[2]);
     } else {
         print_usage();
         return 1;
