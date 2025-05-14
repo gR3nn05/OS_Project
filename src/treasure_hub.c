@@ -5,31 +5,17 @@
 #include <string.h>
 #include <sys/wait.h>
 #include <fcntl.h>
-#include <sys/stat.h>
-#include <dirent.h>
-#include <ctype.h>
-
-typedef struct {
-    int id;
-    char username[128];
-    float latitude;
-    float longitude;
-    char clue[128];
-    int value;
-} Treasure;
+#include <sys/select.h>
+#include "monitor.h"
 
 pid_t monitor_pid = -1;
-volatile sig_atomic_t monitor_exiting = 0;
-
-void run_monitor();
-void handle_list_hunts(int sig);
-void handle_list_treasures(int sig);
-void handle_view_treasure(int sig);
-void handle_sigterm(int sig);
-void sigchld_handler(int sig);
+int pipe_FP[2]; // Pipe for father-to-process communication (commands)
+int pipe_FS[2]; // Pipe for process-to-father communication (responses)
+int monitor_terminating = 0; // Flag to indicate monitor is in the process of terminating
 
 void run_hub() {
     char command[128];
+    char response[4096]; // Larger buffer for responses
 
     while (1) {
         printf("hub> ");
@@ -43,205 +29,205 @@ void run_hub() {
                 printf("Monitor already running (PID %d)\n", monitor_pid);
                 continue;
             }
+            
+            if (monitor_terminating) {
+                printf("Monitor is terminating, please wait...\n");
+                continue;
+            }
+
+            // Create two pipes
+            if (pipe(pipe_FP) == -1 || pipe(pipe_FS) == -1) {
+                perror("pipe");
+                continue;
+            }
 
             monitor_pid = fork();
             if (monitor_pid == 0) {
+                // Child process: Run monitor
+                close(pipe_FP[1]); // Close write end of father-to-process pipe
+                close(pipe_FS[0]); // Close read end of process-to-father pipe
+
+                // Redirect stdin to read from pipe_FP
+                dup2(pipe_FP[0], STDIN_FILENO);
+                
+                // Redirect stdout to write to pipe_FS
+                dup2(pipe_FS[1], STDOUT_FILENO);
+                
+                // Close original file descriptors
+                close(pipe_FP[0]);
+                close(pipe_FS[1]);
+                
+                // Execute the monitor function
                 run_monitor();
                 exit(0);
             } else if (monitor_pid > 0) {
+                // Parent process
+                close(pipe_FP[0]); // Close read end of father-to-process pipe
+                close(pipe_FS[1]); // Close write end of process-to-father pipe
+                
                 printf("Started monitor with PID %d\n", monitor_pid);
+                
+                // Get initial message from monitor
+                fd_set readfds;
+                struct timeval tv;
+                
+                FD_ZERO(&readfds);
+                FD_SET(pipe_FS[0], &readfds);
+                
+                // Set timeout to 1 second
+                tv.tv_sec = 1;
+                tv.tv_usec = 0;
+                
+                int ready = select(pipe_FS[0] + 1, &readfds, NULL, NULL, &tv);
+                
+                if (ready > 0) {
+                    ssize_t bytes_read = read(pipe_FS[0], response, sizeof(response) - 1);
+                    if (bytes_read > 0) {
+                        response[bytes_read] = '\0';
+                        printf("%s", response);
+                    }
+                }
             } else {
                 perror("fork");
             }
         }
 
-        else if (strcmp(command, "list_hunts") == 0) {
-            if (monitor_pid > 0) {
-                kill(monitor_pid, SIGUSR1);
-                usleep(100000); // Wait for monitor to process
-            } else {
-                printf("Error: Monitor is not running.\n");
+        else if (monitor_pid > 0 && strcmp(command, "stop_monitor") == 0) {
+            if (monitor_terminating) {
+                printf("Monitor is already terminating, please wait...\n");
+                continue;
+            }
+            
+            monitor_terminating = 1;
+            kill(monitor_pid, SIGTERM);
+            printf("Stopping monitor...\n");
+            
+            // Wait for monitor to exit with a timeout
+            int status;
+            pid_t result;
+            
+            // Try to wait for the process for a limited time
+            int timeout = 5; // 5 seconds
+            while (timeout > 0) {
+                result = waitpid(monitor_pid, &status, WNOHANG);
+                if (result == monitor_pid) {
+                    // Monitor has exited
+                    printf("[Hub] Monitor exited with status %d\n", WEXITSTATUS(status));
+                    monitor_pid = -1;
+                    monitor_terminating = 0;
+                    
+                    // Close pipes
+                    close(pipe_FP[1]);
+                    close(pipe_FS[0]);
+                    break;
+                } else if (result == 0) {
+                    // Monitor is still running
+                    usleep(100000); // Wait 0.1 second
+                    timeout--;
+                }else {
+            // Error or monitor already handled by signal handler
+                     if (monitor_pid == -1) {
+                // Already handled by signal handler
+                    break;
+                } else {
+                    perror("waitpid");
+                    break;
+            }
+        }
+    }
+            if (timeout == 0 && monitor_pid != -1) {
+                printf("Monitor is taking longer than expected to terminate...\n");
             }
         }
 
-        else if (strcmp(command, "list_treasures") == 0) {
-            if (monitor_pid > 0) {
-                kill(monitor_pid, SIGUSR2);
-                usleep(100000); // Wait for monitor to process
-            } else {
-                printf("Error: Monitor is not running.\n");
-            }
-        }
-
-        else if (strcmp(command, "view_treasure") == 0) {
-            if (monitor_pid > 0) {
-                kill(monitor_pid, SIGUSR2);
-                usleep(100000); // Wait for monitor to process
-            } else {
-                printf("Error: Monitor is not running.\n");
-            }
-        }
-
-        else if (strcmp(command, "stop_monitor") == 0) {
-            if (monitor_pid > 0) {
-                kill(monitor_pid, SIGTERM);
-                printf("Stopping monitor...\n");
-                waitpid(monitor_pid, NULL, 0); // Wait for monitor to exit
-                monitor_pid = -1; // Reset monitor PID
-            } else {
-                printf("Error: Monitor is not running.\n");
-            }
+        else if (monitor_pid > 0 && strcmp(command, "exit") == 0) {
+            printf("Error: Monitor is still running. Use stop_monitor first.\n");
         }
 
         else if (strcmp(command, "exit") == 0) {
-            if (monitor_pid > 0) {
-                printf("Error: Monitor is still running. Use stop_monitor first.\n");
+            break;
+        }
+
+        else if (monitor_pid > 0) {
+            if (monitor_terminating) {
+                printf("Monitor is terminating, command ignored.\n");
+                continue;
+            }
+            
+            // Send command to monitor
+            write(pipe_FP[1], command, strlen(command));
+            write(pipe_FP[1], "\n", 1); // Add newline
+            
+            // Read response from monitor with timeout
+            fd_set readfds;
+            struct timeval tv;
+            
+            // Read response in chunks until no more data
+            ssize_t total_bytes_read = 0;
+            ssize_t bytes_read = 0;
+            response[0] = '\0'; // Initialize empty string
+            
+            do {
+                FD_ZERO(&readfds);
+                FD_SET(pipe_FS[0], &readfds);
+                
+                // Set timeout to 1 second for first read, shorter for subsequent reads
+                tv.tv_sec = (total_bytes_read == 0) ? 1 : 0;
+                tv.tv_usec = (total_bytes_read == 0) ? 0 : 100000; // 100ms for subsequent reads
+                
+                int ready = select(pipe_FS[0] + 1, &readfds, NULL, NULL, &tv);
+                
+                if (ready > 0) {
+                    bytes_read = read(pipe_FS[0], response + total_bytes_read, 
+                                     sizeof(response) - 1 - total_bytes_read);
+                    
+                    if (bytes_read > 0) {
+                        total_bytes_read += bytes_read;
+                        response[total_bytes_read] = '\0';
+                    }
+                } else {
+                    // No more data or timeout
+                    break;
+                }
+            } while (bytes_read > 0 && (size_t)total_bytes_read < sizeof(response) - 1);
+            
+            if (total_bytes_read > 0) {
+                printf("%s", response);
             } else {
-                break;
+                printf("No response from monitor (timeout).\n");
             }
         }
 
+        else if (strcmp(command, "help") == 0) {
+            printf("Available commands:\n");
+            printf("  start_monitor   - Start the monitor process\n");
+            printf("  list_hunts      - List all treasure hunts\n");
+            printf("  list_treasures  - List all treasures in all hunts\n");
+            printf("  view_treasure <hunt_id> <treasure_id> - View details of a specific treasure\n");
+            printf("  stop_monitor    - Stop the monitor process\n");
+            printf("  exit            - Exit the program (monitor must be stopped first)\n");
+            printf("  help            - Show this help message\n");
+        }
         else {
             printf("Unknown command: %s\n", command);
         }
     }
 }
 
-void run_monitor() {
-    printf("[Monitor] Monitor process started. PID = %d\n", getpid());
-
-    struct sigaction sa;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-
-    sa.sa_handler = handle_list_hunts;
-    sigaction(SIGUSR1, &sa, NULL);
-
-    sa.sa_handler = handle_list_treasures;
-    sigaction(SIGUSR2, &sa, NULL);
-
-    sa.sa_handler = handle_sigterm;
-    sigaction(SIGTERM, &sa, NULL);
-
-    while (1) {
-        pause();
-    }
-}
-
-void handle_list_hunts(int sig) {
-    (void)sig;
-    printf("[Monitor] Listing hunts...\n");
-
-    DIR *dir = opendir("hunts");
-    if (!dir) {
-        perror("[Monitor] Failed to open hunts directory");
-        return;
-    }
-
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
-        if (entry->d_type == DT_DIR && strncmp(entry->d_name, "hunt", 4) == 0) {
-            printf("[Monitor] Found hunt: %s\n", entry->d_name);
-        }
-    }
-
-    closedir(dir);
-}
-
-void handle_list_treasures(int sig) {
-    (void)sig;
-    printf("[Monitor] Listing treasures...\n");
-
-    DIR *dir = opendir("hunts");
-    if (!dir) {
-        perror("[Monitor] Failed to open hunts directory");
-        return;
-    }
-
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
-        if (entry->d_type == DT_DIR && strncmp(entry->d_name, "hunt", 4) == 0) {
-            printf("[Monitor] Hunt: %s\n", entry->d_name);
-
-            char file_path[512];
-            snprintf(file_path, sizeof(file_path), "hunts/%s/treasures.dat", entry->d_name);
-
-            int fd = open(file_path, O_RDONLY);
-            if (fd == -1) {
-                perror("[Monitor] Error opening treasure file");
-                continue;
-            }
-
-            Treasure t;
-            printf("\n  Treasures:\n");
-            while (read(fd, &t, sizeof(Treasure)) == sizeof(Treasure)) {
-                printf("    ID: %d | User: %s | Location: (%.2f, %.2f) | Value: %d\n",
-                       t.id, t.username, t.latitude, t.longitude, t.value);
-                printf("    Clue: %s\n\n", t.clue);
-            }
-
-            close(fd);
-        }
-    }
-
-    closedir(dir);
-}
-
-void handle_view_treasure(int sig) {
-    (void)sig;
-    printf("[Monitor] Viewing specific treasure...\n");
-
-    char hunt_id[128];
-    int treasure_id;
-    printf("Enter hunt ID: ");
-    scanf("%s", hunt_id);
-    printf("Enter treasure ID: ");
-    scanf("%d", &treasure_id);
-
-    char file_path[512];
-    snprintf(file_path, sizeof(file_path), "hunts/%s/treasures.dat", hunt_id);
-
-    int fd = open(file_path, O_RDONLY);
-    if (fd == -1) {
-        perror("[Monitor] Error opening treasure file");
-        return;
-    }
-
-    Treasure t;
-    int found = 0;
-    while (read(fd, &t, sizeof(Treasure)) == sizeof(Treasure)) {
-        if (t.id == treasure_id) {
-            printf("[Monitor] Treasure Details:\n");
-            printf("  ID: %d\n", t.id);
-            printf("  User: %s\n", t.username);
-            printf("  Coordinates: (%.2f, %.2f)\n", t.latitude, t.longitude);
-            printf("  Clue: %s\n", t.clue);
-            printf("  Value: %d\n", t.value);
-            found = 1;
-            break;
-        }
-    }
-
-    if (!found) {
-        printf("[Monitor] Treasure ID %d not found in hunt %s.\n", treasure_id, hunt_id);
-    }
-
-    close(fd);
-}
-
-void handle_sigterm(int sig) {
-    (void)sig;
-    printf("[Monitor] Terminating monitor...\n");
-    usleep(500000); // Simulate delayed termination
-    exit(0);
-}
-
 void sigchld_handler(int sig) {
     (void)sig;
     int status;
-    waitpid(monitor_pid, &status, 0);
-    monitor_exiting = 1;
-    printf("[Hub] Monitor exited with status %d\n", status);
+    pid_t pid = waitpid(monitor_pid, &status, WNOHANG);
+    
+    if (pid == monitor_pid) {
+        printf("[Hub] Monitor exited with status %d\n", WEXITSTATUS(status));
+        monitor_pid = -1;
+        monitor_terminating = 0;
+        
+        // Close pipes
+        close(pipe_FP[1]);
+        close(pipe_FS[0]);
+    }
 }
 
 int main() {

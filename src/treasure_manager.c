@@ -15,7 +15,19 @@
 #define LOG_FILE "log"
 
 void print_usage() {
-    printf("Usage: treasure_manager <operation> <hunt_id>\n");
+    printf("Usage: treasure_manager <operation> <hunt_id>\nTry treasure_manager help\n");
+}
+
+void print_help(){
+
+    printf("Usage:\n");
+    printf("  treasure_manager add <hunt_id>           - Add a new treasure to the hunt\n");
+    printf("  treasure_manager list <hunt_id>          - List all treasures in a hunt\n");
+    printf("  treasure_manager view <hunt_id> <id>     - View a specific treasure by ID\n");
+    printf("  treasure_manager remove_treasure <hunt_id> <id> - Remove a specific treasure\n");
+    printf("  treasure_manager remove_hunt <hunt_id>   - Remove the entire hunt and its data\n");
+    printf("  treasure_manager help                    - Show this help message\n");
+
 }
 
 void log_operation(const char *hunt_id, const char *message) {
@@ -239,7 +251,12 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    if(argv[2] == NULL) {
+    if (strcmp(argv[1], "help") == 0) {
+        print_help();
+        return 0;
+    }
+
+    if (argv[2] == NULL) {
         printf("Error: Missing hunt ID.\n");
         print_usage();
         return 1;
